@@ -1,0 +1,64 @@
+- Project: Python + PyQt Media Player with MPV & Remote-Controlled Ads
+
+- Total Budget: $350
+
+
+Upfront Payment (30% = $105)
+Reason: 
+The project requires setting up a development environment with MPV, PyQt, and REST API framework on Debian 11. 
+This includes initial architecture design, dependency setup, and testing MPV integration. 
+Upfront payment ensures commitment from both sides and covers initial time and resource investment.
+
+
+Milestone 1 (20% = $70)
+Title: MPV + PyQt Integration
+- Implement MPV video playback inside a PyQt fullscreen window
+- Support playlist auto-generation from a folder
+- Enable resume on quit using MPV native flags
+
+Deliverables:
+- PyQt window launching MPV player
+- Test folder playback with resume feature
+
+
+Milestone 2 (20% = $70)
+Title: REST API Server Setup
+- Set up Flask or FastAPI backend
+- Implement REST endpoints for:
+  - Start playback
+  - Next / Fastforward controls
+- Ensure API successfully communicates with MPV process
+
+Deliverables:
+- REST API server running
+- Verified playback control via API calls
+
+
+Milestone 3 (20% = $70)
+Title: Overlay Ads System
+- Implement API for overlay ads (text/image)
+- Auto resize main movie area dynamically when overlay is shown
+- Add overlay hide API
+
+Deliverables:
+- /show-overlay and /hide-overlay working as specified
+- Test with text and image banners
+
+Milestone 4 (10% = $35)
+Title: Interrupt Ads System + Final Delivery
+- Implement API for full-screen interrupt ads (video ads)
+- Ensure main movie pauses and resumes correctly
+- Package final code with README, requirements.txt, and test media
+
+Deliverables:
+- /play-interrupt-ad endpoint functional
+- Final polished code delivery
+
+
+Payment Schedule:
+- Upfront: $105
+- Milestone 1: $70
+- Milestone 2: $70
+- Milestone 3: $70
+- Milestone 4: $35
+
