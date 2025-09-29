@@ -1,12 +1,18 @@
 ## Python + PyQt Media Player using MPV (Debian 11)
 
-This project is a fullscreen media player for Debian 11 that embeds MPV inside a PyQt window and will be controlled via a REST API (in later milestones). It is designed for TV-style playback where MPV handles playlist creation and resume-on-quit natively.
+This project is a fullscreen media player for Debian 11 that embeds MPV inside a PyQt window and is controlled via a REST API. It is designed for TV-style playback where MPV handles playlist creation and resume-on-quit natively.
 
-### Milestone 1: MPV + PyQt Integration
+### Milestone 1: MPV + PyQt Integration ✅
 - PyQt fullscreen window
 - MPV embedded via `--wid`
 - Launch with a folder path; MPV auto-generates playlist
 - MPV flags: `--save-position-on-quit` and `--input-ipc-server=/tmp/mpvsocket`
+- **No default MPV controls** - clean fullscreen experience
+
+### Milestone 2: REST API Server Setup ✅
+- Flask REST API server running on configurable port (default: 5000)
+- Full playback control via HTTP endpoints
+- IPC communication with MPV process
 
 ### Requirements
 - Python 3.9+ recommended
@@ -26,21 +32,75 @@ pip3 install -r requirements.txt
 
 ### Run
 ```bash
-python3 player.py --media-dir /path/to/your/videos
+# Development server (default)
+python3 player.py --media-dir /path/to/your/videos --api-port 5000
+
+# Production server (no warnings)
+python3 player.py --media-dir /path/to/your/videos --api-port 5000 --production-server
 ```
 
 Notes:
 - Provide a directory containing videos. MPV will scan and build its playlist automatically.
 - Resume on quit is handled by MPV; no custom logic here.
-- An IPC server is exposed at `/tmp/mpvsocket` for future REST control.
+- REST API server starts automatically on the specified port (default: 5000).
+
+### REST API Endpoints
+
+The player exposes a REST API for remote control:
+
+#### Playback Control
+- `POST /api/play` - Start or resume playback
+- `POST /api/pause` - Pause playback  
+- `POST /api/next` - Go to next video in playlist
+- `POST /api/previous` - Go to previous video in playlist
+
+#### Seeking
+- `POST /api/seek-forward` - Seek forward (default: 30 seconds)
+  ```json
+  {"seconds": 30}
+  ```
+- `POST /api/seek-backward` - Seek backward (default: 30 seconds)
+  ```json
+  {"seconds": 30}
+  ```
+
+#### Volume Control
+- `POST /api/volume` - Set volume (0-100)
+  ```json
+  {"volume": 75}
+  ```
+
+#### Status
+- `GET /api/status` - Get player status and IPC socket info
+
+### Example API Usage
+```bash
+# Check status
+curl http://localhost:5000/api/status
+
+# Play/pause
+curl -X POST http://localhost:5000/api/play
+
+# Next video
+curl -X POST http://localhost:5000/api/next
+
+# Seek forward 60 seconds
+curl -X POST http://localhost:5000/api/seek-forward -H "Content-Type: application/json" -d '{"seconds": 60}'
+
+# Set volume to 80%
+curl -X POST http://localhost:5000/api/volume -H "Content-Type: application/json" -d '{"volume": 80}'
+```
 
 ### Project Layout (current)
 ```
 MVP/
-  player.py                 # PyQt app, embeds MPV via --wid
-  requirements.txt
-  README.md
-  tests/media/              # Put a couple of small sample videos here
+  player.py                 # PyQt app with embedded MPV and REST API
+  requirements.txt          # Python dependencies
+  README.md                 # This documentation
+  test_api.py              # API testing script
+  validate_api.py          # API structure validation
+  tests/media/             # Sample videos for testing
+    test.mp4
 ```
 
 ### Troubleshooting
