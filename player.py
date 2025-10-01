@@ -46,7 +46,6 @@ class MpvProcessManager(QtCore.QObject):
             "mpv",
             media_dir,
             f"--wid={wid}",
-            "--fullscreen=yes",
             "--save-position-on-quit=yes",
             f"--input-ipc-server={self._ipc_path}",
             "--keep-open=no",
@@ -56,8 +55,9 @@ class MpvProcessManager(QtCore.QObject):
             "--no-input-vo-keyboard",  # Disable keyboard input
             "--no-input-cursor",  # Disable cursor input
             "--cursor-autohide=no",  # Keep cursor hidden
-            # You may tweak the video output driver if needed for target hardware:
-            # "--vo=gpu",
+            # Force GPU VO and disable hwdec overlays so Qt overlays stay on top
+            "--vo=x11",
+            "--hwdec=no",
         ]
 
         # Launch mpv detached but tracked by this process
@@ -137,11 +137,126 @@ class MpvProcessManager(QtCore.QObject):
             self._cleanup_ipc_socket()
 
 
+class OverlayBanner(QtWidgets.QFrame):
+    """
+    Banner widget to render text (static or scrolling) or image/GIF.
+    Used for bottom and right overlays.
+    """
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setAutoFillBackground(True)
+        palette = self.palette()
+        # Opaque background to prevent underlying video from bleeding through
+        palette.setColor(self.backgroundRole(), QtGui.QColor(0, 0, 0, 255))
+        self.setPalette(palette)
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)
+
+        self._stack = QtWidgets.QStackedWidget(self)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._stack)
+
+        # Text view
+        self._text_container = QtWidgets.QWidget(self)
+        text_layout = QtWidgets.QHBoxLayout(self._text_container)
+        text_layout.setContentsMargins(12, 6, 12, 6)
+        self._text_label = QtWidgets.QLabel(self._text_container)
+        self._text_label.setStyleSheet("color: white; font-size: 20px;")
+        self._text_label.setWordWrap(False)
+        text_layout.addWidget(self._text_label)
+
+        # Image view (supports GIF via QMovie)
+        self._image_container = QtWidgets.QWidget(self)
+        img_layout = QtWidgets.QHBoxLayout(self._image_container)
+        img_layout.setContentsMargins(0, 0, 0, 0)
+        self._image_label = QtWidgets.QLabel(self._image_container)
+        self._image_label.setAlignment(QtCore.Qt.AlignCenter)
+        img_layout.addWidget(self._image_label)
+
+        self._stack.addWidget(self._text_container)
+        self._stack.addWidget(self._image_container)
+
+        # Marquee timer
+        self._marquee_timer = QtCore.QTimer(self)
+        self._marquee_timer.timeout.connect(self._tick_marquee)
+        self._marquee_enabled = False
+        self._marquee_pos = 0
+
+        # Auto-hide timer
+        self._autohide_timer = QtCore.QTimer(self)
+        self._autohide_timer.setSingleShot(True)
+        self._autohide_timer.timeout.connect(self.hide)
+
+        self.hide()
+
+    def show_text(self, text: str, scroll: bool = False, duration_s: Optional[int] = None) -> None:
+        self._stack.setCurrentWidget(self._text_container)
+        self._text_label.setText(text)
+        self._marquee_enabled = scroll
+        self._marquee_pos = 0
+        if scroll:
+            self._marquee_timer.start(30)
+        else:
+            self._marquee_timer.stop()
+        self._set_autohide(duration_s)
+        self.show()
+        self.update()
+
+    def show_image(self, path: str, duration_s: Optional[int] = 10) -> None:
+        if path.lower().endswith((".gif",)):
+            movie = QtGui.QMovie(path)
+            self._image_label.setMovie(movie)
+            movie.start()
+        else:
+            pix = QtGui.QPixmap(path)
+            if not pix.isNull():
+                self._image_label.setPixmap(
+                    pix.scaled(self.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                )
+        self._stack.setCurrentWidget(self._image_container)
+        self._marquee_timer.stop()
+        self._set_autohide(duration_s)
+        self.show()
+        self.update()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[name-defined]
+        if self._stack.currentWidget() is self._image_container and self._image_label.pixmap() is not None:
+            pix = self._image_label.pixmap()
+            if pix is not None:
+                self._image_label.setPixmap(
+                    pix.scaled(self.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                )
+        return super().resizeEvent(event)
+
+    def _tick_marquee(self) -> None:
+        if not self._marquee_enabled:
+            return
+        text = self._text_label.text()
+        metrics = self._text_label.fontMetrics()
+        text_width = metrics.horizontalAdvance(text) + 100
+        self._marquee_pos = (self._marquee_pos + 2) % max(1, text_width)
+        self._text_label.setStyleSheet(
+            f"color: white; font-size: 20px; margin-left: {-self._marquee_pos}px;"
+        )
+
+    def _set_autohide(self, duration_s: Optional[int]) -> None:
+        self._autohide_timer.stop()
+        if duration_s is not None and duration_s > 0:
+            self._autohide_timer.start(int(duration_s * 1000))
+
+
+class UiBridge(QtCore.QObject):
+    showOverlayRequested = QtCore.pyqtSignal(dict)
+    hideOverlayRequested = QtCore.pyqtSignal(object)
+
+
 class MediaPlayerAPI:
     """REST API server for controlling the media player"""
     
-    def __init__(self, mpv_manager: MpvProcessManager, port: int = 5000):
+    def __init__(self, mpv_manager: MpvProcessManager, bridge: UiBridge, port: int = 5000):
         self.mpv_manager = mpv_manager
+        self.bridge = bridge
         self.app = Flask(__name__)
         self.port = port
         self._setup_routes()
@@ -208,6 +323,20 @@ class MediaPlayerAPI:
                 "ipc_socket": IPC_SOCKET_PATH,
                 "socket_exists": os.path.exists(IPC_SOCKET_PATH)
             })
+
+        @self.app.route('/show-overlay', methods=['POST'])
+        def show_overlay():
+            data = request.get_json() or {}
+            # Expected: position: bottom|side, type: image|text, content: path or text, optional duration, scroll
+            self.bridge.showOverlayRequested.emit(data)
+            return jsonify({"success": True})
+
+        @self.app.route('/hide-overlay', methods=['POST'])
+        def hide_overlay():
+            data = request.get_json() or {}
+            position = data.get('position')  # None, 'bottom', or 'side'
+            self.bridge.hideOverlayRequested.emit(position)
+            return jsonify({"success": True})
     
     def start(self, use_production_server=False):
         """Start the API server in a separate thread"""
@@ -244,6 +373,7 @@ class PlayerWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.media_dir = media_dir
         self.mpv_manager = MpvProcessManager(self)
+        self.bridge = UiBridge()
         self.api_port = api_port
         self.use_production_server = use_production_server
         self.api_server = None
@@ -252,14 +382,55 @@ class PlayerWindow(QtWidgets.QMainWindow):
         self.setCursor(QtCore.Qt.BlankCursor)  # kiosk-like
         self.setContentsMargins(0, 0, 0, 0)
 
-        # Central widget that will host mpv
-        self.video_host = QtWidgets.QWidget(self)
+        # Central composite layout to allow right/bottom overlays while video resizes
+        central = QtWidgets.QWidget(self)
+        central.setContentsMargins(0, 0, 0, 0)
+        self.setCentralWidget(central)
+
+        self.outer_v = QtWidgets.QVBoxLayout(central)
+        self.outer_v.setContentsMargins(0, 0, 0, 0)
+        self.outer_v.setSpacing(0)
+
+        top_row = QtWidgets.QWidget(central)
+        top_row_layout = QtWidgets.QHBoxLayout(top_row)
+        top_row_layout.setContentsMargins(0, 0, 0, 0)
+        top_row_layout.setSpacing(0)
+
+        # Video host on the left of top row
+        self.video_host = QtWidgets.QWidget(top_row)
         self.video_host.setContentsMargins(0, 0, 0, 0)
-        self.setCentralWidget(self.video_host)
+
+        # Right overlay container
+        self.right_overlay = OverlayBanner(top_row)
+        self.right_overlay.setAttribute(QtCore.Qt.WA_NativeWindow, True)
+        self.right_overlay.setFixedWidth(360)
+        self.right_overlay.setSizePolicy(
+            QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding
+        )
+        self.right_overlay.hide()
+
+        top_row_layout.addWidget(self.video_host, 1)
+        top_row_layout.addWidget(self.right_overlay, 0)
+
+        # Bottom overlay container
+        self.bottom_overlay = OverlayBanner(central)
+        self.bottom_overlay.setAttribute(QtCore.Qt.WA_NativeWindow, True)
+        self.bottom_overlay.setFixedHeight(120)
+        self.bottom_overlay.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+        )
+        self.bottom_overlay.hide()
+
+        self.outer_v.addWidget(top_row, 1)
+        self.outer_v.addWidget(self.bottom_overlay, 0)
 
         # Go fullscreen and start mpv once window has a native id
         self.showFullScreen()
         QtCore.QTimer.singleShot(0, self._start_mpv_once_visible)
+
+        # Bridge: connect API thread signals to UI handlers
+        self.bridge.showOverlayRequested.connect(self._on_show_overlay)
+        self.bridge.hideOverlayRequested.connect(self._on_hide_overlay)
 
     def _start_mpv_once_visible(self) -> None:
         # Ensure native window is created
@@ -275,13 +446,43 @@ class PlayerWindow(QtWidgets.QMainWindow):
     
     def _start_api_server(self) -> None:
         """Start the REST API server"""
-        self.api_server = MediaPlayerAPI(self.mpv_manager, self.api_port)
+        self.api_server = MediaPlayerAPI(self.mpv_manager, self.bridge, self.api_port)
         self.api_server.start(self.use_production_server)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[name-defined]
         # ensure mpv stops cleanly so resume position is saved
         self.mpv_manager.stop()
         return super().closeEvent(event)
+
+    # ===== Overlay controls on UI thread =====
+    def _on_show_overlay(self, payload: dict) -> None:
+        position = payload.get("position", "bottom")
+        ad_type = payload.get("type", "text")
+        content = payload.get("content", "")
+        duration = payload.get("duration")
+        scroll = bool(payload.get("scroll", False))
+
+        target = self.bottom_overlay if position == "bottom" else self.right_overlay
+        if ad_type == "text":
+            target.show_text(str(content), scroll=scroll, duration_s=duration)
+        else:
+            target.show_image(str(content), duration_s=duration if duration is not None else 10)
+        target.show()
+        # Ensure stacking and layout update (overlays are native so they sit above mpv child window)
+        target.raise_()
+        self.video_host.lower()
+        self.outer_v.invalidate()
+        self.outer_v.update()
+        target.update()
+
+    def _on_hide_overlay(self, position: Optional[str]) -> None:
+        if position is None:
+            self.bottom_overlay.hide()
+            self.right_overlay.hide()
+        elif position == "bottom":
+            self.bottom_overlay.hide()
+        elif position == "side":
+            self.right_overlay.hide()
 
 
 @click.command()

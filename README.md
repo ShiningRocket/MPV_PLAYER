@@ -14,6 +14,20 @@ This project is a fullscreen media player for Debian 11 that embeds MPV inside a
 - Full playback control via HTTP endpoints
 - IPC communication with MPV process
 
+### Milestone 3: Overlay Ads System ✅
+- Bottom and side overlay banners added to the PyQt layout (both can be shown simultaneously)
+- Supports text (static or scrolling) and image/GIF overlays
+- Overlays auto-hide after configurable duration
+- REST API endpoints:
+  - `POST /show-overlay`
+    ```json
+    {"position":"bottom|side","type":"image|text","content":"/path/or/text","duration":10,"scroll":false}
+    ```
+  - `POST /hide-overlay`
+    ```json
+    {"position":"bottom|side"} // omit to hide all
+    ```
+
 ### Requirements
 - Python 3.9+ recommended
 - Debian 11 with MPV installed
@@ -73,6 +87,16 @@ The player exposes a REST API for remote control:
 #### Status
 - `GET /api/status` - Get player status and IPC socket info
 
+#### Overlay Ads
+- `POST /show-overlay` - Show an overlay banner
+  ```json
+  {"position":"bottom","type":"text","content":"Tonight 9PM: New Episode!","duration":15,"scroll":true}
+  ```
+- `POST /hide-overlay` - Hide an overlay banner (or all)
+  ```json
+  {"position":"side"}
+  ```
+
 ### Example API Usage
 ```bash
 # Check status
@@ -94,11 +118,9 @@ curl -X POST http://localhost:5000/api/volume -H "Content-Type: application/json
 ### Project Layout (current)
 ```
 MVP/
-  player.py                 # PyQt app with embedded MPV and REST API
+  player.py                 # PyQt app with embedded MPV and REST API + overlays
   requirements.txt          # Python dependencies
   README.md                 # This documentation
-  test_api.py              # API testing script
-  validate_api.py          # API structure validation
   tests/media/             # Sample videos for testing
     test.mp4
 ```
