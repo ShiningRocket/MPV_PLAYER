@@ -67,6 +67,8 @@ The player exposes a REST API for remote control:
 - `POST /api/pause` - Pause playback  
 - `POST /api/next` - Go to next video in playlist
 - `POST /api/previous` - Go to previous video in playlist
+- `POST /api/mute` - Mute audio
+- `POST /api/unmute` - Unmute audio
 
 #### Seeking
 - `POST /api/seek-forward` - Seek forward (default: 30 seconds)
@@ -104,6 +106,13 @@ The player exposes a REST API for remote control:
   ```
   Notes: The ad is played via a temporary fullscreen MPV process. Main playback is paused before the ad and resumed after it ends.
 
+#### Backup Selection Menu (Remote-driven)
+- `POST /menu/open` - Show the on-screen selection menu
+- `POST /menu/close` - Hide the menu
+- `POST /menu/next` - Move selection down
+- `POST /menu/prev` - Move selection up
+- `POST /menu/confirm` - Play the selected item (replaces current playback)
+
 ### Example API Usage
 ```bash
 # Check status
@@ -131,6 +140,10 @@ MVP/
   tests/media/             # Sample videos for testing
     test.mp4
 ```
+
+### UI Controls (Auto-hide)
+- A thin control bar appears on mouse movement with: Prev, Next, FF+30s, Mute, Unmute.
+- Controls map to the same operations as the API; API remains the main control channel.
 
 ### Troubleshooting
 - If you see a black screen, ensure MPV is installed and X11 is used (not Wayland), and that your GPU drivers are OK. Try `--vo=gpu` or `--vo=xv` in `player.py` if needed.

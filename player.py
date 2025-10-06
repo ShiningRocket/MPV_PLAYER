@@ -116,6 +116,16 @@ class MpvProcessManager(QtCore.QObject):
     def resume(self) -> bool:
         return self._send_ipc_command(["set", "pause", False])
 
+    def mute(self) -> bool:
+        return self._send_ipc_command(["set", "mute", True])
+
+    def unmute(self) -> bool:
+        return self._send_ipc_command(["set", "mute", False])
+
+    def load_file(self, path: str) -> bool:
+        """Replace current playback with given file"""
+        return self._send_ipc_command(["loadfile", path, "replace"])
+
     def stop(self) -> None:
         if self._process is None:
             return
@@ -255,6 +265,7 @@ class OverlayBanner(QtWidgets.QFrame):
 class UiBridge(QtCore.QObject):
     showOverlayRequested = QtCore.pyqtSignal(dict)
     hideOverlayRequested = QtCore.pyqtSignal(object)
+    menuCommandRequested = QtCore.pyqtSignal(str)
 
 
 class MediaPlayerAPI:
@@ -319,6 +330,16 @@ class MediaPlayerAPI:
                 return jsonify({"success": False, "error": "Volume must be between 0 and 100"}), 400
             success = self.mpv_manager.set_volume(volume)
             return jsonify({"success": success, "action": "set_volume", "volume": volume})
+
+        @self.app.route('/api/mute', methods=['POST'])
+        def api_mute():
+            success = self.mpv_manager.mute()
+            return jsonify({"success": success, "action": "mute"})
+
+        @self.app.route('/api/unmute', methods=['POST'])
+        def api_unmute():
+            success = self.mpv_manager.unmute()
+            return jsonify({"success": success, "action": "unmute"})
         
         @self.app.route('/api/status', methods=['GET'])
         def status():
@@ -359,6 +380,32 @@ class MediaPlayerAPI:
             # Store path globally in app context to be consumed by UI
             self.app.config['INTERRUPT_AD_FILE'] = ad_file
             QtCore.QTimer.singleShot(0, lambda: self.bridge.parent().play_interrupt_ad(ad_file) if self.bridge.parent() else None)
+            return jsonify({"success": True})
+
+        # Menu control (remote-driven backup UI)
+        @self.app.route('/menu/open', methods=['POST'])
+        def menu_open():
+            self.bridge.menuCommandRequested.emit('open')
+            return jsonify({"success": True})
+
+        @self.app.route('/menu/close', methods=['POST'])
+        def menu_close():
+            self.bridge.menuCommandRequested.emit('close')
+            return jsonify({"success": True})
+
+        @self.app.route('/menu/next', methods=['POST'])
+        def menu_next():
+            self.bridge.menuCommandRequested.emit('next')
+            return jsonify({"success": True})
+
+        @self.app.route('/menu/prev', methods=['POST'])
+        def menu_prev():
+            self.bridge.menuCommandRequested.emit('prev')
+            return jsonify({"success": True})
+
+        @self.app.route('/menu/confirm', methods=['POST'])
+        def menu_confirm():
+            self.bridge.menuCommandRequested.emit('confirm')
             return jsonify({"success": True})
     
     def start(self, use_production_server=False):
@@ -448,6 +495,91 @@ class PlayerWindow(QtWidgets.QMainWindow):
         self.outer_v.addWidget(top_row, 1)
         self.outer_v.addWidget(self.bottom_overlay, 0)
 
+        # Auto-hide controls bar overlayed above bottom banner (stacks above video)
+        self.controls_container = QtWidgets.QFrame(central)
+        self.controls_container.setAutoFillBackground(True)
+        palette = self.controls_container.palette()
+        palette.setColor(self.controls_container.backgroundRole(), QtGui.QColor(30, 30, 30, 230))
+        self.controls_container.setPalette(palette)
+        self.controls_container.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.controls_container.setFixedHeight(108)
+        self.controls_container.hide()
+
+        controls_layout = QtWidgets.QHBoxLayout(self.controls_container)
+        controls_layout.setContentsMargins(16, 12, 16, 12)
+        controls_layout.setSpacing(16)
+
+        def make_tile_button(text: Optional[str] = None, icon: Optional[QtGui.QIcon] = None) -> QtWidgets.QToolButton:
+            btn = QtWidgets.QToolButton(self.controls_container)
+            btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon if text else QtCore.Qt.ToolButtonIconOnly)
+            btn.setFixedSize(96, 84)
+            if icon is not None:
+                btn.setIcon(icon)
+                btn.setIconSize(QtCore.QSize(42, 42))
+            if text:
+                btn.setText(text)
+            btn.setStyleSheet(
+                """
+                QToolButton {
+                  background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                               stop:0 #f6f6f6, stop:1 #e9e9e9);
+                  border: 1px solid #cfcfcf;
+                  border-radius: 8px;
+                  color: #222;
+                }
+                QToolButton:pressed { background: #dddddd; }
+                """
+            )
+            return btn
+
+        style = self.style()
+        icon_play = style.standardIcon(QtWidgets.QStyle.SP_MediaPlay)
+        icon_next = style.standardIcon(QtWidgets.QStyle.SP_MediaSkipForward)
+        icon_volume = style.standardIcon(QtWidgets.QStyle.SP_MediaVolume)
+        icon_close = style.standardIcon(QtWidgets.QStyle.SP_DialogCloseButton)
+
+        self.btn_play = make_tile_button(icon=icon_play)
+        self.btn_next = make_tile_button(icon=icon_next)
+        self.btn_seek30 = make_tile_button(text="30s")
+        self.btn_volume = make_tile_button(icon=icon_volume)
+        self.btn_close = make_tile_button(icon=icon_close)
+
+        for b in (self.btn_play, self.btn_next, self.btn_seek30, self.btn_volume, self.btn_close):
+            controls_layout.addWidget(b)
+
+        self.outer_v.addWidget(self.controls_container, 0)
+
+        # Wire button actions
+        self.btn_play.clicked.connect(lambda: self.mpv_manager.play_pause())
+        self.btn_next.clicked.connect(lambda: self.mpv_manager.next_video())
+        self.btn_seek30.clicked.connect(lambda: self.mpv_manager.seek_forward(30))
+
+        # Volume toggling
+        self._muted = False
+        def toggle_mute() -> None:
+            self._muted = not self._muted
+            if self._muted:
+                self.mpv_manager.mute()
+                self.btn_volume.setIcon(style.standardIcon(QtWidgets.QStyle.SP_MediaVolumeMuted))
+            else:
+                self.mpv_manager.unmute()
+                self.btn_volume.setIcon(style.standardIcon(QtWidgets.QStyle.SP_MediaVolume))
+        self.btn_volume.clicked.connect(toggle_mute)
+
+        # Close controls bar
+        self.btn_close.clicked.connect(self.controls_container.hide)
+
+        # Auto-hide behavior: show on mouse move, hide after inactivity
+        self._controls_hide_timer = QtCore.QTimer(self)
+        self._controls_hide_timer.setSingleShot(True)
+        self._controls_hide_timer.timeout.connect(self.controls_container.hide)
+        self._controls_autohide_ms = 3000
+        self.setMouseTracking(True)
+        central.setMouseTracking(True)
+        top_row.setMouseTracking(True)
+        self.video_host.setMouseTracking(True)
+        self.controls_container.setMouseTracking(True)
+
         # Go fullscreen and start mpv once window has a native id
         self.showFullScreen()
         QtCore.QTimer.singleShot(0, self._start_mpv_once_visible)
@@ -455,6 +587,7 @@ class PlayerWindow(QtWidgets.QMainWindow):
         # Bridge: connect API thread signals to UI handlers
         self.bridge.showOverlayRequested.connect(self._on_show_overlay)
         self.bridge.hideOverlayRequested.connect(self._on_hide_overlay)
+        self.bridge.menuCommandRequested.connect(self._on_menu_command)
 
     def _start_mpv_once_visible(self) -> None:
         # Ensure native window is created
@@ -470,6 +603,9 @@ class PlayerWindow(QtWidgets.QMainWindow):
         # Optional: start demo overlays shortly after start
         if self.demo_overlays:
             QtCore.QTimer.singleShot(3000, self._demo_show_overlays)
+
+        # Show controls briefly on startup
+        self._show_controls_temporarily()
     
     def _start_api_server(self) -> None:
         """Start the REST API server"""
@@ -480,6 +616,15 @@ class PlayerWindow(QtWidgets.QMainWindow):
         # ensure mpv stops cleanly so resume position is saved
         self.mpv_manager.stop()
         return super().closeEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[name-defined]
+        self._show_controls_temporarily()
+        return super().mouseMoveEvent(event)
+
+    def _show_controls_temporarily(self) -> None:
+        self.controls_container.show()
+        self.controls_container.raise_()
+        self._controls_hide_timer.start(self._controls_autohide_ms)
 
     # ===== Overlay controls on UI thread =====
     def _on_show_overlay(self, payload: dict) -> None:
@@ -535,6 +680,101 @@ class PlayerWindow(QtWidgets.QMainWindow):
             self.bottom_overlay.hide()
         elif position == "side":
             self.right_overlay.hide()
+
+    # ===== Simple selection menu (backup UI) =====
+    def _ensure_menu(self) -> None:
+        if hasattr(self, "menu_container"):
+            return
+        self.menu_container = QtWidgets.QFrame(self)
+        self.menu_container.setAutoFillBackground(True)
+        palette = self.menu_container.palette()
+        palette.setColor(self.menu_container.backgroundRole(), QtGui.QColor(0, 0, 0, 220))
+        self.menu_container.setPalette(palette)
+        self.menu_container.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.menu_container.setFixedWidth(480)
+        self.menu_container.setFixedHeight(360)
+        self.menu_container.hide()
+
+        layout = QtWidgets.QVBoxLayout(self.menu_container)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+        title = QtWidgets.QLabel("Select Movie", self.menu_container)
+        title.setStyleSheet("color: white; font-size: 22px; font-weight: bold;")
+        layout.addWidget(title)
+        self.menu_list = QtWidgets.QListWidget(self.menu_container)
+        self.menu_list.setStyleSheet("color: white; font-size: 16px;")
+        layout.addWidget(self.menu_list, 1)
+
+        # Place menu at center
+        geo = self.geometry()
+        self.menu_container.move(
+            geo.center().x() - self.menu_container.width() // 2,
+            geo.center().y() - self.menu_container.height() // 2,
+        )
+
+    def _populate_menu(self) -> None:
+        self.menu_list.clear()
+        try:
+            entries = sorted(
+                [
+                    os.path.join(self.media_dir, f)
+                    for f in os.listdir(self.media_dir)
+                    if os.path.isfile(os.path.join(self.media_dir, f))
+                       and f.lower().endswith((".mp4", ".mkv", ".avi", ".mov", ".webm"))
+                ]
+            )
+        except Exception:
+            entries = []
+        self._menu_entries = entries
+        for path in entries:
+            item = QtWidgets.QListWidgetItem(os.path.basename(path))
+            self.menu_list.addItem(item)
+        if entries:
+            self.menu_list.setCurrentRow(0)
+
+    def _menu_open(self) -> None:
+        self._ensure_menu()
+        self._populate_menu()
+        self.menu_container.show()
+        self.menu_container.raise_()
+        self._show_controls_temporarily()
+
+    def _menu_close(self) -> None:
+        if hasattr(self, "menu_container"):
+            self.menu_container.hide()
+
+    def _menu_next(self) -> None:
+        if hasattr(self, "menu_list") and self.menu_list.count() > 0:
+            row = (self.menu_list.currentRow() + 1) % self.menu_list.count()
+            self.menu_list.setCurrentRow(row)
+
+    def _menu_prev(self) -> None:
+        if hasattr(self, "menu_list") and self.menu_list.count() > 0:
+            row = (self.menu_list.currentRow() - 1) % self.menu_list.count()
+            self.menu_list.setCurrentRow(row)
+
+    def _menu_confirm(self) -> None:
+        if not hasattr(self, "menu_list") or self.menu_list.count() == 0:
+            return
+        row = self.menu_list.currentRow()
+        if row < 0 or row >= len(getattr(self, "_menu_entries", [])):
+            return
+        path = self._menu_entries[row]
+        # Replace current playback with chosen file
+        self.mpv_manager.load_file(path)
+        self._menu_close()
+
+    def _on_menu_command(self, action: str) -> None:
+        if action == 'open':
+            self._menu_open()
+        elif action == 'close':
+            self._menu_close()
+        elif action == 'next':
+            self._menu_next()
+        elif action == 'prev':
+            self._menu_prev()
+        elif action == 'confirm':
+            self._menu_confirm()
 
     # ===== Interrupt Ad flow =====
     def play_interrupt_ad(self, ad_path: str) -> None:
