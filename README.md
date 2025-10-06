@@ -97,6 +97,13 @@ The player exposes a REST API for remote control:
   {"position":"side"}
   ```
 
+#### Interrupt Ads
+- `POST /play-interrupt-ad` - Pause movie, play fullscreen ad, then resume
+  ```json
+  {"file":"./tests/media/test_ad.mp4"}
+  ```
+  Notes: The ad is played via a temporary fullscreen MPV process. Main playback is paused before the ad and resumed after it ends.
+
 ### Example API Usage
 ```bash
 # Check status

@@ -110,6 +110,12 @@ class MpvProcessManager(QtCore.QObject):
         """Set volume (0-100)"""
         return self._send_ipc_command(["set", "volume", volume])
 
+    def pause(self) -> bool:
+        return self._send_ipc_command(["set", "pause", True])
+
+    def resume(self) -> bool:
+        return self._send_ipc_command(["set", "pause", False])
+
     def stop(self) -> None:
         if self._process is None:
             return
@@ -337,6 +343,23 @@ class MediaPlayerAPI:
             position = data.get('position')  # None, 'bottom', or 'side'
             self.bridge.hideOverlayRequested.emit(position)
             return jsonify({"success": True})
+
+        @self.app.route('/play-interrupt-ad', methods=['POST'])
+        def play_interrupt_ad():
+            data = request.get_json() or {}
+            ad_file = data.get('file')
+            if not ad_file or not os.path.exists(ad_file):
+                return jsonify({"success": False, "error": "Ad file not found"}), 400
+            # Emit signal to UI/main thread to run interrupt ad flow
+            QtCore.QMetaObject.invokeMethod(
+                self.bridge,  # use bridge to hop to UI thread via PlayerWindow method
+                "objectName",
+                QtCore.Qt.QueuedConnection
+            )
+            # Store path globally in app context to be consumed by UI
+            self.app.config['INTERRUPT_AD_FILE'] = ad_file
+            QtCore.QTimer.singleShot(0, lambda: self.bridge.parent().play_interrupt_ad(ad_file) if self.bridge.parent() else None)
+            return jsonify({"success": True})
     
     def start(self, use_production_server=False):
         """Start the API server in a separate thread"""
@@ -369,7 +392,7 @@ class MediaPlayerAPI:
 
 
 class PlayerWindow(QtWidgets.QMainWindow):
-    def __init__(self, media_dir: str, api_port: int = 5000, use_production_server: bool = False) -> None:
+    def __init__(self, media_dir: str, api_port: int = 5000, use_production_server: bool = False, demo_overlays: bool = False) -> None:
         super().__init__()
         self.media_dir = media_dir
         self.mpv_manager = MpvProcessManager(self)
@@ -377,6 +400,7 @@ class PlayerWindow(QtWidgets.QMainWindow):
         self.api_port = api_port
         self.use_production_server = use_production_server
         self.api_server = None
+        self.demo_overlays = demo_overlays
 
         self.setWindowTitle("MPV Player")
         self.setCursor(QtCore.Qt.BlankCursor)  # kiosk-like
@@ -403,7 +427,7 @@ class PlayerWindow(QtWidgets.QMainWindow):
         # Right overlay container
         self.right_overlay = OverlayBanner(top_row)
         self.right_overlay.setAttribute(QtCore.Qt.WA_NativeWindow, True)
-        self.right_overlay.setFixedWidth(360)
+        self.right_overlay.setFixedWidth(240)
         self.right_overlay.setSizePolicy(
             QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding
         )
@@ -415,7 +439,7 @@ class PlayerWindow(QtWidgets.QMainWindow):
         # Bottom overlay container
         self.bottom_overlay = OverlayBanner(central)
         self.bottom_overlay.setAttribute(QtCore.Qt.WA_NativeWindow, True)
-        self.bottom_overlay.setFixedHeight(120)
+        self.bottom_overlay.setFixedHeight(96)
         self.bottom_overlay.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
         )
@@ -443,6 +467,9 @@ class PlayerWindow(QtWidgets.QMainWindow):
         
         # Start the API server after MPV is running
         QtCore.QTimer.singleShot(2000, self._start_api_server)  # Wait 2 seconds for MPV to start
+        # Optional: start demo overlays shortly after start
+        if self.demo_overlays:
+            QtCore.QTimer.singleShot(3000, self._demo_show_overlays)
     
     def _start_api_server(self) -> None:
         """Start the REST API server"""
@@ -461,8 +488,15 @@ class PlayerWindow(QtWidgets.QMainWindow):
         content = payload.get("content", "")
         duration = payload.get("duration")
         scroll = bool(payload.get("scroll", False))
+        width = payload.get("width")
+        height = payload.get("height")
 
         target = self.bottom_overlay if position == "bottom" else self.right_overlay
+        # Apply requested size to reserve layout space like TV banners
+        if position == "bottom" and isinstance(height, int) and height > 40:
+            self.bottom_overlay.setFixedHeight(height)
+        if position == "side" and isinstance(width, int) and width > 80:
+            self.right_overlay.setFixedWidth(width)
         if ad_type == "text":
             target.show_text(str(content), scroll=scroll, duration_s=duration)
         else:
@@ -475,6 +509,24 @@ class PlayerWindow(QtWidgets.QMainWindow):
         self.outer_v.update()
         target.update()
 
+    def _demo_show_overlays(self) -> None:
+        # Show a side image ad and a bottom ticker like TV
+        self._on_show_overlay({
+            "position": "side",
+            "type": "image",
+            "content": os.path.abspath(os.path.join(os.path.dirname(__file__), "tests", "media", "test.png")),
+            "width": 240,
+            "duration": 15,
+        })
+        self._on_show_overlay({
+            "position": "bottom",
+            "type": "text",
+            "content": "Now Playing: Demo — Tonight 9PM New Episode | Visit example.com",
+            "scroll": True,
+            "height": 96,
+            "duration": 20,
+        })
+
     def _on_hide_overlay(self, position: Optional[str]) -> None:
         if position is None:
             self.bottom_overlay.hide()
@@ -483,6 +535,45 @@ class PlayerWindow(QtWidgets.QMainWindow):
             self.bottom_overlay.hide()
         elif position == "side":
             self.right_overlay.hide()
+
+    # ===== Interrupt Ad flow =====
+    def play_interrupt_ad(self, ad_path: str) -> None:
+        # Pause main playback
+        self.mpv_manager.pause()
+        # Launch a separate mpv in fullscreen on top for the ad
+        args = [
+            "mpv",
+            ad_path,
+            "--fullscreen=yes",
+            "--keep-open=no",
+            "--idle=no",
+            "--no-osd-bar",
+            "--no-input-default-bindings",
+            "--no-input-vo-keyboard",
+            "--no-input-cursor",
+            "--cursor-autohide=yes",
+            "--vo=x11",
+            "--hwdec=no",
+            "--speed=1",
+            "--quiet",
+            "--really-quiet",
+        ]
+        ad_proc = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            close_fds=True,
+        )
+
+        # Poll until ad process exits, then resume main
+        def _wait_and_resume():
+            ad_proc.wait()
+            # Hide any overlays that might have been shown for the ad
+            QtCore.QTimer.singleShot(0, lambda: self._on_hide_overlay(None))
+            self.mpv_manager.resume()
+
+        threading.Thread(target=_wait_and_resume, daemon=True).start()
 
 
 @click.command()
@@ -503,13 +594,18 @@ class PlayerWindow(QtWidgets.QMainWindow):
     is_flag=True,
     help="Use production WSGI server (Gunicorn) instead of Flask development server.",
 )
-def main(media_dir: str, api_port: int, production_server: bool) -> None:
+@click.option(
+    "--demo-overlays",
+    is_flag=True,
+    help="Show a demo side image ad and bottom ticker automatically.",
+)
+def main(media_dir: str, api_port: int, production_server: bool, demo_overlays: bool) -> None:
     # Qt Application
     app = QtWidgets.QApplication(sys.argv)
     # Make sure our central widget uses native windowing for --wid embedding
     app.setQuitOnLastWindowClosed(True)
 
-    window = PlayerWindow(media_dir=media_dir, api_port=api_port, use_production_server=production_server)
+    window = PlayerWindow(media_dir=media_dir, api_port=api_port, use_production_server=production_server, demo_overlays=demo_overlays)
     window.show()
     sys.exit(app.exec_())
 
