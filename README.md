@@ -131,6 +131,14 @@ curl -X POST http://localhost:5000/api/seek-forward -H "Content-Type: applicatio
 curl -X POST http://localhost:5000/api/volume -H "Content-Type: application/json" -d '{"volume": 80}'
 ```
 
+### Demo Script
+- Prepare sample assets per `tests/media/README.txt`.
+- Run the player, then in another terminal:
+  ```bash
+  ./demo.sh 5000
+  ```
+  This will show a side image ad, a bottom ticker, and trigger an interrupt ad.
+
 ### Project Layout (current)
 ```
 MVP/

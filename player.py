@@ -448,9 +448,11 @@ class PlayerWindow(QtWidgets.QMainWindow):
         self.use_production_server = use_production_server
         self.api_server = None
         self.demo_overlays = demo_overlays
+        self.current_play_path: Optional[str] = None
 
         self.setWindowTitle("MPV Player")
-        self.setCursor(QtCore.Qt.BlankCursor)  # kiosk-like
+        # Ensure mouse cursor is visible for controller/menu interactions
+        self.unsetCursor()
         self.setContentsMargins(0, 0, 0, 0)
 
         # Central composite layout to allow right/bottom overlays while video resizes
@@ -495,27 +497,27 @@ class PlayerWindow(QtWidgets.QMainWindow):
         self.outer_v.addWidget(top_row, 1)
         self.outer_v.addWidget(self.bottom_overlay, 0)
 
-        # Auto-hide controls bar overlayed above bottom banner (stacks above video)
-        self.controls_container = QtWidgets.QFrame(central)
+        # Auto-hide controls dock on the right side (vertical tiles)
+        self.controls_container = QtWidgets.QFrame(top_row)
         self.controls_container.setAutoFillBackground(True)
         palette = self.controls_container.palette()
         palette.setColor(self.controls_container.backgroundRole(), QtGui.QColor(30, 30, 30, 230))
         self.controls_container.setPalette(palette)
         self.controls_container.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.controls_container.setFixedHeight(108)
+        self.controls_container.setFixedWidth(60)
         self.controls_container.hide()
 
-        controls_layout = QtWidgets.QHBoxLayout(self.controls_container)
-        controls_layout.setContentsMargins(16, 12, 16, 12)
-        controls_layout.setSpacing(16)
+        controls_layout = QtWidgets.QVBoxLayout(self.controls_container)
+        controls_layout.setContentsMargins(10, 10, 10, 10)
+        controls_layout.setSpacing(20)
 
         def make_tile_button(text: Optional[str] = None, icon: Optional[QtGui.QIcon] = None) -> QtWidgets.QToolButton:
             btn = QtWidgets.QToolButton(self.controls_container)
             btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon if text else QtCore.Qt.ToolButtonIconOnly)
-            btn.setFixedSize(96, 84)
+            btn.setFixedSize(40, 40)
             if icon is not None:
                 btn.setIcon(icon)
-                btn.setIconSize(QtCore.QSize(42, 42))
+                btn.setIconSize(QtCore.QSize(20, 20))
             if text:
                 btn.setText(text)
             btn.setStyleSheet(
@@ -537,17 +539,20 @@ class PlayerWindow(QtWidgets.QMainWindow):
         icon_next = style.standardIcon(QtWidgets.QStyle.SP_MediaSkipForward)
         icon_volume = style.standardIcon(QtWidgets.QStyle.SP_MediaVolume)
         icon_close = style.standardIcon(QtWidgets.QStyle.SP_DialogCloseButton)
+        icon_list = style.standardIcon(QtWidgets.QStyle.SP_FileDialogListView)
 
         self.btn_play = make_tile_button(icon=icon_play)
         self.btn_next = make_tile_button(icon=icon_next)
         self.btn_seek30 = make_tile_button(text="30s")
         self.btn_volume = make_tile_button(icon=icon_volume)
+        self.btn_menu = make_tile_button(icon=icon_list)
         self.btn_close = make_tile_button(icon=icon_close)
 
-        for b in (self.btn_play, self.btn_next, self.btn_seek30, self.btn_volume, self.btn_close):
+        for b in (self.btn_play, self.btn_next, self.btn_seek30, self.btn_volume, self.btn_menu, self.btn_close):
             controls_layout.addWidget(b)
 
-        self.outer_v.addWidget(self.controls_container, 0)
+        # Add controls panel to the far right of the top row (after right overlay)
+        top_row_layout.addWidget(self.controls_container, 0)
 
         # Wire button actions
         self.btn_play.clicked.connect(lambda: self.mpv_manager.play_pause())
@@ -568,6 +573,9 @@ class PlayerWindow(QtWidgets.QMainWindow):
 
         # Close controls bar
         self.btn_close.clicked.connect(self.controls_container.hide)
+
+        # Open movie selection menu
+        self.btn_menu.clicked.connect(self._menu_open)
 
         # Auto-hide behavior: show on mouse move, hide after inactivity
         self._controls_hide_timer = QtCore.QTimer(self)
@@ -702,7 +710,9 @@ class PlayerWindow(QtWidgets.QMainWindow):
         title.setStyleSheet("color: white; font-size: 22px; font-weight: bold;")
         layout.addWidget(title)
         self.menu_list = QtWidgets.QListWidget(self.menu_container)
-        self.menu_list.setStyleSheet("color: white; font-size: 16px;")
+        self.menu_list.setStyleSheet("color: black; font-size: 16px;")
+        # Play immediately on double-click
+        self.menu_list.itemDoubleClicked.connect(lambda _item: self._menu_confirm())
         layout.addWidget(self.menu_list, 1)
 
         # Place menu at center
@@ -731,6 +741,18 @@ class PlayerWindow(QtWidgets.QMainWindow):
             self.menu_list.addItem(item)
         if entries:
             self.menu_list.setCurrentRow(0)
+        self._update_menu_colors()
+
+    def _update_menu_colors(self) -> None:
+        if not hasattr(self, "menu_list"):
+            return
+        for i in range(self.menu_list.count()):
+            item = self.menu_list.item(i)
+            path = self._menu_entries[i] if i < len(getattr(self, "_menu_entries", [])) else None
+            if path and path == self.current_play_path:
+                item.setForeground(QtGui.QBrush(QtGui.QColor("red")))
+            else:
+                item.setForeground(QtGui.QBrush(QtGui.QColor("black")))
 
     def _menu_open(self) -> None:
         self._ensure_menu()
@@ -762,6 +784,9 @@ class PlayerWindow(QtWidgets.QMainWindow):
         path = self._menu_entries[row]
         # Replace current playback with chosen file
         self.mpv_manager.load_file(path)
+        # Mark as currently playing (blue in the list)
+        self.current_play_path = path
+        self._update_menu_colors()
         self._menu_close()
 
     def _on_menu_command(self, action: str) -> None:
@@ -790,8 +815,8 @@ class PlayerWindow(QtWidgets.QMainWindow):
             "--no-osd-bar",
             "--no-input-default-bindings",
             "--no-input-vo-keyboard",
-            "--no-input-cursor",
-            "--cursor-autohide=yes",
+            # Show cursor during interrupt ad
+            # (avoid --no-input-cursor and autohide)
             "--vo=x11",
             "--hwdec=no",
             "--speed=1",
