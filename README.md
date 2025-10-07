@@ -2,32 +2,6 @@
 
 This project is a fullscreen media player for Debian 11 that embeds MPV inside a PyQt window and is controlled via a REST API. It is designed for TV-style playback where MPV handles playlist creation and resume-on-quit natively.
 
-### Milestone 1: MPV + PyQt Integration ✅
-- PyQt fullscreen window
-- MPV embedded via `--wid`
-- Launch with a folder path; MPV auto-generates playlist
-- MPV flags: `--save-position-on-quit` and `--input-ipc-server=/tmp/mpvsocket`
-- **No default MPV controls** - clean fullscreen experience
-
-### Milestone 2: REST API Server Setup ✅
-- Flask REST API server running on configurable port (default: 5000)
-- Full playback control via HTTP endpoints
-- IPC communication with MPV process
-
-### Milestone 3: Overlay Ads System ✅
-- Bottom and side overlay banners added to the PyQt layout (both can be shown simultaneously)
-- Supports text (static or scrolling) and image/GIF overlays
-- Overlays auto-hide after configurable duration
-- REST API endpoints:
-  - `POST /show-overlay`
-    ```json
-    {"position":"bottom|side","type":"image|text","content":"/path/or/text","duration":10,"scroll":false}
-    ```
-  - `POST /hide-overlay`
-    ```json
-    {"position":"bottom|side"} // omit to hide all
-    ```
-
 ### Requirements
 - Python 3.9+ recommended
 - Debian 11 with MPV installed
